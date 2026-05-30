@@ -11,6 +11,21 @@
 @implementation CompressFileHandler {
 
 }
+
+- (FlutterError *)flutterErrorWithCode:(NSString *)code message:(NSString *)message details:(id)details {
+    return [FlutterError errorWithCode:code message:message details:details];
+}
+
+- (FlutterError *)flutterErrorWithNSError:(NSError *)error fallbackMessage:(NSString *)fallbackMessage {
+    NSString *message = error.localizedDescription ?: fallbackMessage;
+    return [self flutterErrorWithCode:@"COMPRESS_ERROR"
+                              message:message
+                              details:@{
+                                  @"domain": error.domain ?: @"",
+                                  @"code": @(error.code)
+                              }];
+}
+
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
 
     NSArray *args = call.arguments;
@@ -28,6 +43,12 @@
     
     NSURL *imageUrl = [NSURL fileURLWithPath:path];
     NSData *nsdata = [NSData dataWithContentsOfURL:imageUrl];
+    if (nsdata == nil) {
+        result([self flutterErrorWithCode:@"SRC_ERROR"
+                                  message:@"Unable to read source image file."
+                                  details:@{@"path": path ?: @""}]);
+        return;
+    }
     
     NSString *imageType = [self mimeTypeByGuessingFromData:nsdata];
     
@@ -42,13 +63,30 @@
         img = [UIImage imageWithData:nsdata];
     }
 
+    if (img == nil) {
+        result([self flutterErrorWithCode:@"SRC_ERROR"
+                                  message:@"Unable to decode source image file."
+                                  details:@{@"path": path ?: @"", @"mimeType": imageType ?: @""}]);
+        return;
+    }
 
-    NSData *data = [CompressHandler compressWithUIImage:img minWidth:minWidth minHeight:minHeight quality:quality rotate:rotate format:formatType];
+    NSError *compressError = nil;
+    NSData *data = [CompressHandler compressWithUIImage:img minWidth:minWidth minHeight:minHeight quality:quality rotate:rotate format:formatType error:&compressError];
+    if (data == nil) {
+        result([self flutterErrorWithNSError:compressError fallbackMessage:@"Image compression produced no data."]);
+        return;
+    }
 
     if (keepExif) {
         SYMetadata *metadata = [SYMetadata metadataWithFileURL:[NSURL fileURLWithPath:path]];
         metadata.orientation = @0;
         data = [SYMetadata dataWithImageData:data andMetadata:metadata];
+        if (data == nil) {
+            result([self flutterErrorWithCode:@"EXIF_ERROR"
+                                      message:@"Unable to write metadata to compressed image."
+                                      details:@{@"path": path ?: @""}]);
+            return;
+        }
     }
 
     result([FlutterStandardTypedData typedDataWithBytes:data]);
@@ -71,6 +109,12 @@
     
     NSURL *imageUrl = [NSURL fileURLWithPath:path];
     NSData *nsdata = [NSData dataWithContentsOfURL:imageUrl];
+    if (nsdata == nil) {
+        result([self flutterErrorWithCode:@"SRC_ERROR"
+                                  message:@"Unable to read source image file."
+                                  details:@{@"path": path ?: @""}]);
+        return;
+    }
     
     NSString *imageType = [self mimeTypeByGuessingFromData:nsdata];
     
@@ -84,16 +128,47 @@
     } else {
         img = [UIImage imageWithData:nsdata];
     }
+
+    if (img == nil) {
+        result([self flutterErrorWithCode:@"SRC_ERROR"
+                                  message:@"Unable to decode source image file."
+                                  details:@{@"path": path ?: @"", @"mimeType": imageType ?: @""}]);
+        return;
+    }
     
-    NSData *data = [CompressHandler compressDataWithUIImage:img minWidth:minWidth minHeight:minHeight quality:quality rotate:rotate format:formatType];
+    NSError *compressError = nil;
+    NSData *data = [CompressHandler compressDataWithUIImage:img minWidth:minWidth minHeight:minHeight quality:quality rotate:rotate format:formatType error:&compressError];
+    if (data == nil) {
+        result([self flutterErrorWithNSError:compressError fallbackMessage:@"Image compression produced no data."]);
+        return;
+    }
 
     if (keepExif) {
         SYMetadata *metadata = [SYMetadata metadataWithFileURL:[NSURL fileURLWithPath:path]];
         metadata.orientation = @0;
         data = [SYMetadata dataWithImageData:data andMetadata:metadata];
+        if (data == nil) {
+            result([self flutterErrorWithCode:@"EXIF_ERROR"
+                                      message:@"Unable to write metadata to compressed image."
+                                      details:@{@"path": path ?: @""}]);
+            return;
+        }
     }
 
-    [data writeToURL:[[NSURL alloc] initFileURLWithPath:targetPath] atomically:YES];
+    NSURL *targetURL = [[NSURL alloc] initFileURLWithPath:targetPath];
+    NSError *writeError = nil;
+    BOOL writeSuccess = [data writeToURL:targetURL options:NSDataWritingAtomic error:&writeError];
+    if (!writeSuccess) {
+        result([self flutterErrorWithNSError:writeError fallbackMessage:@"Unable to write compressed image file."]);
+        return;
+    }
+
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:targetPath error:&writeError];
+    NSNumber *fileSize = attributes[NSFileSize];
+    if (attributes == nil || fileSize == nil || fileSize.unsignedLongLongValue == 0) {
+        result([self flutterErrorWithNSError:writeError fallbackMessage:@"Compressed image output file is missing or empty."]);
+        return;
+    }
 
     result(targetPath);
 }
